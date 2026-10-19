@@ -27,7 +27,7 @@ RUN mkdir -p build && cd build && \
         -DWITH_STORE_RUST=OFF \
         -DWITH_RUST_EXAMPLE=OFF \
         -DWITH_EP=OFF && \
-    cmake --build . --target mooncake_master master_bench && \
+    cmake --build . --parallel "${BUILD_JOBS:-3}" --target mooncake_master master_bench && \
     ln -sf "$(find /workspace/build -type f -name mooncake_master -perm -u+x | head -1)" /usr/local/bin/mooncake_master && \
     ln -sf "$(find /workspace/build -type f -name master_bench -perm -u+x | head -1)" /usr/local/bin/master_bench && \
     mooncake_master --help >/dev/null 2>&1; master_bench --help >/dev/null 2>&1; \
