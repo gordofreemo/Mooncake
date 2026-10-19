@@ -112,16 +112,19 @@ def main():
         headroom = peak["keys_per_s"] / demand[-1][0]
         last = sub.iloc[-1]
         ax.annotate(
-            f"{op}: peak {si(peak['keys_per_s'])} keys/s{per_core}, "
-            f"{headroom:.1f}x the page-level demand",
+            f"{op}: peak {si(peak['keys_per_s'])} keys/s\n"
+            f"{per_core.lstrip(', ')}, {headroom:.1f}x the page-level demand",
             xy=(last["num_clients"], last["keys_per_s"]),
-            xytext=(0, 10 if op == "Lookups" else -16), textcoords="offset points",
+            xytext=(0, 10 if op == "Lookups" else -14), textcoords="offset points",
             ha="right", va="bottom" if op == "Lookups" else "top",
-            fontsize=10, color="dimgrey", weight="semibold",
+            fontsize=10, color="dimgrey", weight="semibold", linespacing=1.3,
         )
-    for level, text in demand:
+    for i, (level, text) in enumerate(demand):
         ax.axhline(level, color="grey", linestyle=":", linewidth=1.2, zorder=1)
-        ax.text(1, level * 1.12, text, fontsize=9, color="dimgrey", ha="left", va="bottom")
+        # Upper line's label goes below it, clear of the curves starting above it.
+        above = i == 0
+        ax.text(1, level * (1.12 if above else 0.88), text, fontsize=9, color="dimgrey",
+                ha="left", va="bottom" if above else "top")
 
     ax.set_xscale("log", base=2)
     ax.set_xticks(sorted(agg["num_clients"].unique()))
