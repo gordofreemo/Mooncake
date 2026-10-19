@@ -15,7 +15,7 @@ if [ "$MODE" = fanin-smoke ]; then
     JOBS="FanGet magni1 fanget
 FanPut magni1 fanput"
 elif [ "$MODE" = fanin ]; then
-    ENV="STORE_COUNTS=32,128,512,2048,8192 ACTIVE=16 REPEATS=3 DURATION=60 WARMUP=5 PAUSE=10 PREFILL=10000000"
+    ENV="STORE_COUNTS=32,128,512,2048,8192 ACTIVE=16 REPEATS=3 DURATION=60 WARMUP=5 PAUSE=10 PREFILL=1000000"
     JOBS="FanGet magni1 fanget
 FanPut magni2 fanput"
 elif [ "$MODE" = smoke ]; then
