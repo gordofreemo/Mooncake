@@ -10,7 +10,15 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 OUT=$HERE/../results/$MODE-$STAMP
 mkdir -p "$OUT"
 
-if [ "$MODE" = smoke ]; then
+if [ "$MODE" = fanin-smoke ]; then
+    ENV="STORE_COUNTS=32,8192 ACTIVE=16 REPEATS=1 DURATION=10 WARMUP=2 PAUSE=2 PREFILL=200000"
+    JOBS="FanGet magni1 fanget
+FanPut magni1 fanput"
+elif [ "$MODE" = fanin ]; then
+    ENV="STORE_COUNTS=32,128,512,2048,8192 ACTIVE=16 REPEATS=3 DURATION=60 WARMUP=5 PAUSE=10 PREFILL=10000000"
+    JOBS="FanGet magni1 fanget
+FanPut magni2 fanput"
+elif [ "$MODE" = smoke ]; then
     ENV="CLIENTS=1,8 REPEATS=1 DURATION=10 WARMUP=2 PAUSE=2 PREFILL=200000"
     JOBS="BatchGet magni1 get
 BatchPut magni1 put"

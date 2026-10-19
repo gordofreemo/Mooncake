@@ -24,11 +24,13 @@ PORT=${PORT:-50051}
 
 mkdir -p "$OUT"
 RESULTS="$OUT/results.jsonl"
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
 {
     echo "host=$(hostname) date=$(date -Is) op=$OP"
     echo "clients=$CLIENTS repeats=$REPEATS duration=$DURATION warmup=$WARMUP prefill=$PREFILL"
     echo "master_cores=$MASTER_CORES rpc_threads=$RPC_THREADS client_cores=$CLIENT_CORES"
-    echo "segments=$SEGMENTS segment_size=$SEGMENT_SIZE"
+    echo "segments=$SEGMENTS segment_size=$SEGMENT_SIZE store_counts=${STORE_COUNTS:-} active=${ACTIVE:-}"
+    echo "nofile=$(ulimit -n) hard=$(ulimit -Hn)"
     lscpu | grep -E "Model name|Socket|Core|Thread|NUMA node" || true
     free -g | head -2 || true
 } > "$OUT/env.txt"
@@ -64,12 +66,15 @@ trap stop_master EXIT
 
 bench() {
     local tag=$1
-    shift
+    local operation=$2
+    local segments=$3
+    local segment_size=$4
+    shift 4
     taskset -c "$CLIENT_CORES" master_bench \
         --master_server="127.0.0.1:$PORT" \
-        --operation="$OP" \
-        --num_segments="$SEGMENTS" \
-        --segment_size="$SEGMENT_SIZE" \
+        --operation="$operation" \
+        --num_segments="$segments" \
+        --segment_size="$segment_size" \
         --value_size=4096 \
         --batch_size=128 \
         --num_threads=1 \
@@ -88,7 +93,7 @@ bench() {
 case "$OP" in
     BatchGet)
         start_master get
-        bench "get" --clients_list="$CLIENTS" --repeats="$REPEATS" --pause="$PAUSE"
+        bench "get" BatchGet "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="$CLIENTS" --repeats="$REPEATS" --pause="$PAUSE"
         stop_master
         ;;
     BatchPut)
@@ -96,9 +101,32 @@ case "$OP" in
         for n in "${COUNTS[@]}"; do
             for r in $(seq 0 $((REPEATS - 1))); do
                 start_master "put_n${n}_r${r}"
-                bench "put_n${n}_r${r}" --clients_list="$n" --repeats=1 --repeat_offset="$r"
+                bench "put_n${n}_r${r}" BatchPut "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="$n" --repeats=1 --repeat_offset="$r"
                 stop_master
             done
+        done
+        ;;
+    FanGet | FanPut)
+        # E2: vary the number of storage clients (each mounts one segment and
+        # pings once per second) at a fixed active load; total pool size fixed.
+        POOL=${POOL:-$((64 * 1024 * 1024 * 1024 * 1024))}
+        ACTIVE=${ACTIVE:-16}
+        IFS=',' read -ra STORES <<< "${STORE_COUNTS:-32,128,512,2048,8192}"
+        for s in "${STORES[@]}"; do
+            size=$((POOL / s))
+            if [ "$OP" = FanGet ]; then
+                start_master "fanget_s${s}"
+                bench "fanget_s${s}" BatchGet "$s" "$size" --clients_list="$ACTIVE" \
+                    --repeats="$REPEATS" --pause="$PAUSE"
+                stop_master
+            else
+                for r in $(seq 0 $((REPEATS - 1))); do
+                    start_master "fanput_s${s}_r${r}"
+                    bench "fanput_s${s}_r${r}" BatchPut "$s" "$size" --clients_list="$ACTIVE" \
+                        --repeats=1 --repeat_offset="$r"
+                    stop_master
+                done
+            fi
         done
         ;;
     *)
