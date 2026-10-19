@@ -63,7 +63,7 @@ stop_master() {
         sleep 2
     fi
 }
-trap stop_master EXIT
+trap 'stop_stress; stop_master' EXIT
 
 bench() {
     local tag=$1
@@ -87,8 +87,40 @@ bench() {
         --prefill_threads="$PREFILL_THREADS" \
         --master_pid="$MPID" \
         --result_tag="$tag" \
-        "$@" 2>>"$OUT/bench_$tag.log" |
-        sed -n 's/^RESULT //p' >> "$RESULTS"
+        "$@" 2>>"$OUT/bench_$tag.log" > "$OUT/stdout_$tag.log" ||
+        echo "master_bench $tag exited with $?" >> "$OUT/env.txt"
+    sed -n 's/^RESULT //p' "$OUT/stdout_$tag.log" >> "$RESULTS"
+    sed -n 's/^TIMELINE //p' "$OUT/stdout_$tag.log" >> "$OUT/timeline.jsonl"
+}
+
+# Largest calls_per_s among the RESULT lines tagged $1.
+max_calls_per_s() {
+    python3 - "$RESULTS" "$1" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+print(max(r["calls_per_s"] for r in rows if r["tag"] == sys.argv[2]))
+PY
+}
+
+# Start stress-ng with $1 CPU workers per core on cores $2; sets SPID.
+SPID=""
+start_stress() {
+    local per_core=$1 cores=$2 n
+    n=$(taskset -c "$cores" nproc)
+    SPID=""
+    if [ "$per_core" -gt 0 ]; then
+        stress-ng --cpu $((per_core * n)) --cpu-method int64 --taskset "$cores" \
+            --quiet > "$OUT/stress.log" 2>&1 &
+        SPID=$!
+        sleep 2
+    fi
+}
+stop_stress() {
+    if [ -n "$SPID" ]; then
+        kill -TERM "$SPID" 2>/dev/null || true
+        wait "$SPID" 2>/dev/null || true
+        SPID=""
+    fi
 }
 
 case "$OP" in
@@ -128,6 +160,77 @@ case "$OP" in
                     stop_master
                 done
             fi
+        done
+        ;;
+    Evict)
+        # E3: steady state with a full pool. RESIDENT objects of VALUE_SIZE
+        # fill the pool to FILL (the eviction watermark is 0.90); writers then
+        # add new keys, so the pool stays at the watermark and eviction runs
+        # continuously. Mixed lookups read the most recent RESIDENT/10 keys.
+        VALUE_SIZE=${VALUE_SIZE:-1048576}
+        FILL=${FILL:-0.85}
+        ACTIVE=${ACTIVE:-16}
+        MIXED=${MIXED:-16}
+        IFS=',' read -ra RESIDENTS <<< "${RESIDENT:-1000000,10000000}"
+        for res in "${RESIDENTS[@]}"; do
+            size=$(python3 -c "import math; print(math.ceil($res * $VALUE_SIZE / $FILL / $SEGMENTS / 2**20) * 2**20)")
+            start_master "evict_r${res}"
+            bench "evict_r${res}" BatchPut "$SEGMENTS" "$size" --clients_list="$ACTIVE" \
+                --repeats=1 --value_size="$VALUE_SIZE" --prefill_objects="$res" \
+                --mixed_get_clients="$MIXED" --get_recent_window=$((res / 10)) \
+                --timeline=true
+            stop_master
+        done
+        ;;
+    OpenGet | OpenPut)
+        # E5: Poisson arrivals at fractions of the closed-loop capacity, which
+        # is calibrated first on the same node (best of CAL_CLIENTS).
+        LOADS=${LOADS:-0.1,0.3,0.5,0.7,0.8,0.9,0.95}
+        OPEN_CLIENTS=${OPEN_CLIENTS:-256}
+        CAL_CLIENTS=${CAL_CLIENTS:-16,32,64,128}
+        op=BatchGet
+        if [ "$OP" = OpenPut ]; then op=BatchPut; fi
+        start_master "${OP}_cal"
+        bench "${OP}_cal" "$op" "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="$CAL_CLIENTS" --repeats=1 \
+            --duration="${CAL_DURATION:-15}" --warmup=2
+        stop_master
+        cap=$(max_calls_per_s "${OP}_cal")
+        echo "capacity_calls_per_s=$cap" >> "$OUT/env.txt"
+        IFS=',' read -ra FRACS <<< "$LOADS"
+        for f in "${FRACS[@]}"; do
+            rate=$(python3 -c "print($cap * $f)")
+            if [ "$OP" = OpenGet ]; then
+                start_master "openget_f${f}"
+                bench "openget_f${f}" BatchGet "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="$OPEN_CLIENTS" \
+                    --repeats="$REPEATS" --pause="$PAUSE" --open_loop_rate="$rate"
+                stop_master
+            else
+                for r in $(seq 0 $((REPEATS - 1))); do
+                    start_master "openput_f${f}_r${r}"
+                    bench "openput_f${f}_r${r}" BatchPut "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="$OPEN_CLIENTS" \
+                        --repeats=1 --repeat_offset="$r" --open_loop_rate="$rate"
+                    stop_master
+                done
+            fi
+        done
+        ;;
+    Contend)
+        # E4: open-loop lookups at a fixed RATE (calls/s) while stress-ng runs
+        # LEVEL CPU workers per core on the client cores or the master cores.
+        RATE=${RATE:-5000}
+        IFS=',' read -ra LEVEL_LIST <<< "${LEVELS:-0,1,2,4}"
+        IFS=',' read -ra SIDE_LIST <<< "${SIDES:-client,master}"
+        for side in "${SIDE_LIST[@]}"; do
+            cores=$CLIENT_CORES
+            if [ "$side" = master ]; then cores=$MASTER_CORES; fi
+            for k in "${LEVEL_LIST[@]}"; do
+                start_master "contend_${side}_k${k}"
+                start_stress "$k" "$cores"
+                bench "contend_${side}_k${k}" BatchGet "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="${ACTIVE:-16}" \
+                    --repeats="$REPEATS" --pause="$PAUSE" --open_loop_rate="$RATE"
+                stop_stress
+                stop_master
+            done
         done
         ;;
     *)
