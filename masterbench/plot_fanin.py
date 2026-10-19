@@ -29,6 +29,15 @@ STYLE = {
     "Put": dict(color="#d73027", marker="s"),
 }
 
+CAPTION_COMPARE = r"""\caption{Upstream and patched Mooncake master against the number of storage
+clients. The patch removes per-key work proportional to the number of segments and
+clients from \texttt{PutStart}; placement and error handling are unchanged.
+(a)~Keys served per second. (b)~Master CPU time per written key. Sixteen active
+clients issue 128-key requests; 1M keys are preloaded; 16 cores of an AMD EPYC~9654.
+Points are medians of three 60\,s runs.}
+\label{fig:master-fanin-patched}
+"""
+
 CAPTION = r"""\caption{Effect of the number of storage clients on a single Mooncake master.
 Each storage client mounts one segment and sends a heartbeat every second; the total
 pool size is fixed, so only the number of segments changes. Sixteen active clients issue
@@ -114,7 +123,13 @@ def main():
     rows = []
     for root in roots:
         for path in sorted(root.rglob("results.jsonl")):
-            rows += [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+            env = path.parent / "env.txt"
+            variant = "patched" if env.exists() and "fast_put=1" in env.read_text() else "upstream"
+            for line in path.read_text().splitlines():
+                if line.strip():
+                    row = json.loads(line)
+                    row["variant"] = variant
+                    rows.append(row)
     if not rows:
         sys.exit("no results.jsonl found under " + ", ".join(map(str, roots)))
     df = pd.DataFrame(rows).dropna(subset=["keys_per_s", "lat_p50_ms"])
@@ -122,7 +137,17 @@ def main():
     df["stores"] = df["num_segments"]
     requested = df["keys_ok"] + df["keys_not_found"] + df["keys_err"]
     df["valid"] = (df["keys_not_found"] == 0) & (df["keys_err"] == 0) & (requested > 0)
-    good = df[df["valid"]]
+    everything = df[df["valid"]]
+    good = everything[everything["variant"] == "upstream"]
+    if good.empty:
+        good = everything
+    agg_all = (
+        everything.groupby(["variant", "op", "stores"])
+        .agg(keys_per_s=("keys_per_s", "median"), keys_min=("keys_per_s", "min"),
+             keys_max=("keys_per_s", "max"), master_cpu_pct=("master_cpu_pct", "median"))
+        .reset_index()
+    )
+    agg_all["cpu_us_per_key"] = agg_all["master_cpu_pct"] / 100 / agg_all["keys_per_s"] * 1e6
     agg = (
         good.groupby(["op", "stores"])
         .agg(keys_per_s=("keys_per_s", "median"), keys_min=("keys_per_s", "min"),
@@ -171,6 +196,47 @@ def main():
         fig.savefig(out / f"fig_fanin.{ext}", dpi=300)
     plt.close(fig)
     (out / "fig_fanin_caption.tex").write_text(CAPTION)
+
+    # --- Plot: upstream vs. patched (only when both variants are present) ---
+    if agg_all["variant"].nunique() > 1:
+        agg_all.to_csv(out / "fanin_compare.csv", index=False)
+        fig, (ax_t, ax_c) = plt.subplots(1, 2, figsize=(7.0, 1.85))
+        fig.subplots_adjust(wspace=0.32)
+        for (variant, op), sub in agg_all.groupby(["variant", "op"]):
+            sub = sub.sort_values("stores")
+            st = dict(STYLE[op])
+            ls = "-" if variant == "upstream" else "--"
+            face = st["color"] if variant == "upstream" else "white"
+            ax_t.errorbar(sub["stores"], sub["keys_per_s"],
+                          yerr=[sub["keys_per_s"] - sub["keys_min"], sub["keys_max"] - sub["keys_per_s"]],
+                          capsize=1.5, elinewidth=0.6, capthick=0.6, ls=ls, markerfacecolor=face, **st)
+            if op == "Put":
+                ax_c.plot(sub["stores"], sub["cpu_us_per_key"], ls=ls, markerfacecolor=face, **st)
+        for ax in (ax_t, ax_c):
+            setup_x(ax, counts)
+            ax.set_yscale("log")
+        ax_t.yaxis.set_major_formatter(FuncFormatter(si))
+        ax_t.set_ylabel("Throughput (keys/s)")
+        ax_c.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}"))
+        ax_c.set_ylabel("Master CPU per write (\u00b5s)")
+        for ax, label in ((ax_t, "(a) Throughput"), (ax_c, "(b) Write cost")):
+            ax.text(0.5, -0.36, label, transform=ax.transAxes, ha="center", va="top", fontsize=8)
+        handles = [Line2D([0], [0], label="Get", **STYLE["Get"]),
+                   Line2D([0], [0], label="Put", **STYLE["Put"]),
+                   Line2D([0], [0], color="0.2", ls="-", label="upstream"),
+                   Line2D([0], [0], color="0.2", ls="--", marker="o", markerfacecolor="white",
+                          label="patched")]
+        fig.legend(handles=handles, loc="lower center", bbox_to_anchor=(0.5, 0.93), ncol=4,
+                   frameon=False, handlelength=2.2, columnspacing=1.5, borderaxespad=0)
+        for ext in ("pdf", "png"):
+            fig.savefig(out / f"fig_fanin_compare.{ext}", dpi=300)
+        plt.close(fig)
+        (out / "fig_fanin_compare_caption.tex").write_text(CAPTION_COMPARE)
+        for (variant, op), sub in agg_all.groupby(["variant", "op"]):
+            sub = sub.sort_values("stores")
+            print(f"{variant} {op}: " + ", ".join(
+                f"{int(r.stores)}: {r.keys_per_s:,.0f} keys/s ({r.cpu_us_per_key:.1f} us/key)"
+                for r in sub.itertuples()))
 
     # --- Summary (numbers for the text) ---
     lines = []
