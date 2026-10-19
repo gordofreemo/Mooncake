@@ -89,7 +89,7 @@ def main():
         return f"{value:.3g}"
 
     caption = (
-        "One master pinned to 16 cores (BlueField-3 core count; Xeon cores, so an upper bound). "
+        "One master pinned to 16 cores (BlueField-3 core count; AMD EPYC 9654 server cores, so an upper bound). "
         "128 keys per request, 10M keys preloaded,\nclients and master on the same node "
         "(network round trip excluded). Each client sends one request at a time. "
         "Median of 3 runs; bars show min-max."
@@ -208,10 +208,17 @@ def main():
     prefill = df[df["master_rss_after_prefill"] > 0]
     if not prefill.empty:
         row = prefill.iloc[0]
+        idle = []
+        for root in roots:
+            for path in root.rglob("master_rss_idle.txt"):
+                idle += [int(float(l.split()[1])) for l in path.read_text().splitlines() if l.strip()]
+        base = min(idle) if idle else 0
+        delta = row["master_rss_after_prefill"] - base
         lines.append(
             f"Master memory after preloading {int(row['prefill_objects']):,} keys: "
-            f"{row['master_rss_after_prefill'] / 2**30:.2f} GiB "
-            f"({row['master_rss_after_prefill'] / row['prefill_objects']:.0f} bytes per key, process total)"
+            f"{row['master_rss_after_prefill'] / 2**30:.2f} GiB, idle {base / 2**30:.2f} GiB "
+            f"=> {delta / row['prefill_objects']:.0f} bytes per key "
+            f"(includes the 32 segments' allocator state)"
         )
     bad = df[~df["valid"]]
     lines.append(f"Runs: {len(df)} total, {len(bad)} invalid (lookups not found or errors)")

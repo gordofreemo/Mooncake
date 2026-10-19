@@ -42,6 +42,8 @@ start_master() {
     MPID=$!
     for _ in $(seq 1 120); do
         if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+            sleep 1
+            echo "$1 $(awk '/VmRSS/ {print $2 * 1024}' "/proc/$MPID/status")" >> "$OUT/master_rss_idle.txt"
             return 0
         fi
         sleep 0.5
