@@ -38,7 +38,7 @@ executable     = $HERE/run_sweep.sh
 arguments      = $op $OUT/$name
 environment    = "$ENV"
 requirements   = (Machine == "$node.hpc.uni-saarland.de")
-request_cpus   = 192
+request_cpus   = ${REQUEST_CPUS:-192}
 request_memory = 256GB
 request_disk   = 20GB
 should_transfer_files = YES
