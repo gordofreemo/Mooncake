@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <thread>
 #include <tuple>
+#include <typeinfo>
 #include <regex>
 #include <unordered_set>
 #include <unistd.h>
@@ -5166,13 +5167,26 @@ auto MasterService::AllocateReplicas(const std::string& key,
                 append_preferred_segment(preferred_segment);
             }
         }
+        // masterbench: with MOONCAKE_MASTERBENCH_FAST_PUT=1 and the random
+        // strategy, allocate from the live allocator manager under the shared
+        // segment lock instead of copying it, and count serving segments only
+        // after a failed allocation.
+        const AllocationStrategy* strategy = allocation_strategy_.get();
+        const bool fast_put =
+            MasterbenchFastPut() && strategy != nullptr &&
+            typeid(*strategy) == typeid(RandomAllocationStrategy);
+        tl::expected<std::vector<Replica>, ErrorCode> allocation_result =
+            tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
         AllocatorManager allocator_snapshot;
         {
             ScopedAllocatorAccess allocator_access =
                 segment_manager_.getAllocatorAccess();
-            has_enough_memory_segments = allocator_access.getAllocatorManager()
-                                             .getServingNames()
-                                             .size() >= config.replica_num;
+            if (!fast_put) {
+                has_enough_memory_segments =
+                    allocator_access.getAllocatorManager()
+                        .getServingNames()
+                        .size() >= config.replica_num;
+            }
             if (!writer_host_id.empty()) {
                 auto host_ordered_segments =
                     allocator_access.GetHostOrderedSegments(writer_host_id,
@@ -5187,12 +5201,30 @@ auto MasterService::AllocateReplicas(const std::string& key,
                             << host_ordered_segments.size();
                 }
             }
-            allocator_snapshot = allocator_access.SnapshotAllocatorManager();
+            if (fast_put) {
+                const auto& live_manager = allocator_access.getAllocatorManager();
+                allocation_result = allocation_strategy_->Allocate(
+                    live_manager, value_length, config.replica_num,
+                    preferred_segments, std::set<std::string>(),
+                    ReplicaType::MEMORY);
+                if (!allocation_result.has_value() ||
+                    allocation_result->size() < config.replica_num) {
+                    has_enough_memory_segments =
+                        live_manager.countServing(config.replica_num) >=
+                        config.replica_num;
+                }
+            } else {
+                allocator_snapshot =
+                    allocator_access.SnapshotAllocatorManager();
+            }
         }
 
-        auto allocation_result = allocation_strategy_->Allocate(
-            allocator_snapshot, value_length, config.replica_num,
-            preferred_segments, std::set<std::string>(), ReplicaType::MEMORY);
+        if (!fast_put) {
+            allocation_result = allocation_strategy_->Allocate(
+                allocator_snapshot, value_length, config.replica_num,
+                preferred_segments, std::set<std::string>(),
+                ReplicaType::MEMORY);
+        }
 
         if (!allocation_result.has_value()) {
             VLOG(1) << "Failed to allocate replicas for key=" << key
@@ -5539,15 +5571,28 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
     // capacity exhaustion; gates the forced bucket eviction retry below so
     // memory/NoF exhaustion cannot delete unrelated DFS data.
     bool dfs_allocation_failed = false;
-    auto admit =
+    // masterbench: with MOONCAKE_MASTERBENCH_FAST_PUT=1, skip building the
+    // live-client set, which only the stale-handle cleanup of an existing key
+    // reads. If the key exists, admit_once() asks for a retry, and
+    // admit() reruns it on the upstream path, so that case is unchanged.
+    bool needs_retaining_clients = !MasterbenchFastPut();
+    bool retry_with_retaining_clients = false;
+    auto admit_once =
         [&]() -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
         auto now = std::chrono::system_clock::now();
         {
-            std::shared_lock<std::shared_mutex> client_lock(client_mutex_);
+            std::shared_lock<std::shared_mutex> client_lock(client_mutex_,
+                                                            std::defer_lock);
+            if (needs_retaining_clients) {
+                client_lock.lock();
+            }
             std::shared_lock<std::shared_mutex> shared_lock(
                 master_state_mutex_);
-            auto retaining_clients = GetRetainingClientIdsLocked();
-            client_lock.unlock();
+            decltype(GetRetainingClientIdsLocked()) retaining_clients;
+            if (needs_retaining_clients) {
+                retaining_clients = GetRetainingClientIdsLocked();
+                client_lock.unlock();
+            }
             const size_t lookup_shard_idx =
                 getShardIndex(object_id.tenant_id, object_id.user_key);
             MetadataShardAccessorRW shard(this, lookup_shard_idx);
@@ -5563,6 +5608,10 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             }
 
             auto it = tenant_state.metadata.find(key);
+            if (it != tenant_state.metadata.end() && !needs_retaining_clients) {
+                retry_with_retaining_clients = true;
+                return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);
+            }
             if (it != tenant_state.metadata.end()) {
                 auto cleanup_plan = BuildStaleHandleCleanupPlan(
                     it->second.metadata, retaining_clients);
@@ -5627,6 +5676,16 @@ auto MasterService::PutStart(const UUID& client_id, const std::string& key,
             // return or erase the entry. Kept for -Wreturn-type.
             return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);
         }
+    };
+    auto admit =
+        [&]() -> tl::expected<std::vector<Replica::Descriptor>, ErrorCode> {
+        auto result = admit_once();
+        if (retry_with_retaining_clients) {
+            retry_with_retaining_clients = false;
+            needs_retaining_clients = true;
+            result = admit_once();
+        }
+        return result;
     };
 
     // Tenant over-quota remains a background-eviction concern. Bucket-count

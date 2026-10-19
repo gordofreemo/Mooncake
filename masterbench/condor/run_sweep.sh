@@ -31,6 +31,7 @@ ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
     echo "master_cores=$MASTER_CORES rpc_threads=$RPC_THREADS client_cores=$CLIENT_CORES"
     echo "segments=$SEGMENTS segment_size=$SEGMENT_SIZE store_counts=${STORE_COUNTS:-} active=${ACTIVE:-}"
     echo "nofile=$(ulimit -n) hard=$(ulimit -Hn)"
+    echo "fast_put=${MOONCAKE_MASTERBENCH_FAST_PUT:-0}"
     lscpu | grep -E "Model name|Socket|Core|Thread|NUMA node" || true
     free -g | head -2 || true
 } > "$OUT/env.txt"

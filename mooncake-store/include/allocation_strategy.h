@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <set>
@@ -22,6 +23,20 @@ namespace mooncake {
 class LocalSsdManager;
 class ScopedAllocatorAccess;
 class ScopedSegmentAccess;
+
+/**
+ * @brief masterbench: true when MOONCAKE_MASTERBENCH_FAST_PUT=1. Enables a
+ *        PutStart path that does no per-key work proportional to the number
+ *        of mounted segments or registered clients. Off by default, so the
+ *        upstream path is unchanged.
+ */
+inline bool MasterbenchFastPut() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("MOONCAKE_MASTERBENCH_FAST_PUT");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
 
 /**
  * @brief A container for managing valid allocators.
@@ -173,6 +188,34 @@ class AllocatorManager {
     }
 
     /**
+     * @brief Whether segment `name` has at least one serving registration.
+     */
+    [[nodiscard]] bool isServing(const std::string& name) const {
+        const auto it = allocators_.find(name);
+        return it != allocators_.end() &&
+               std::any_of(it->second.begin(), it->second.end(),
+                           [](const auto& registration) {
+                               return registration->IsServing();
+                           });
+    }
+
+    /**
+     * @brief Count serving segments, stopping once `limit` is reached.
+     */
+    [[nodiscard]] size_t countServing(size_t limit) const {
+        size_t count = 0;
+        for (const auto& name : names_) {
+            if (count >= limit) {
+                break;
+            }
+            if (isServing(name)) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    /**
      * @brief Get allocator registrations belonging to the given segment name.
      * @return a vector of registrations belonging to the segment name
      */
@@ -313,6 +356,12 @@ class RandomAllocationStrategy : public AllocationStrategy {
             return tl::make_unexpected(ErrorCode::INVALID_PARAMS);
         }
 
+        if (MasterbenchFastPut()) {
+            return AllocateWithoutNameCopy(allocator_manager, slice_length,
+                                           replica_num, preferred_segments,
+                                           excluded_segments, replica_type);
+        }
+
         // Check available segments.
         const auto names = allocator_manager.getServingNames();
         if (names.empty()) {
@@ -450,6 +499,73 @@ class RandomAllocationStrategy : public AllocationStrategy {
     }
 
    private:
+    /**
+     * @brief masterbench: the placement of Allocate(), walking the live name
+     *        list instead of copying the serving names on every call. The
+     *        retry budget counts serving segments only, as in Allocate().
+     *        The random start is uniform over all segments rather than over
+     *        serving ones; the two coincide when every segment is serving.
+     */
+    tl::expected<std::vector<Replica>, ErrorCode> AllocateWithoutNameCopy(
+        const AllocatorManager& allocator_manager, const size_t slice_length,
+        const size_t replica_num,
+        const std::vector<std::string>& preferred_segments,
+        const std::set<std::string>& excluded_segments,
+        const ReplicaType replica_type) {
+        const auto& names = allocator_manager.getNames();
+        if (names.empty()) {
+            return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+        }
+
+        std::vector<Replica> replicas;
+        replicas.reserve(replica_num);
+        std::set<std::string> used_segments;
+
+        for (const auto& preferred_segment : preferred_segments) {
+            if (excluded_segments.contains(preferred_segment) ||
+                used_segments.contains(preferred_segment)) {
+                continue;
+            }
+            auto buffer = allocateSingle(allocator_manager, preferred_segment,
+                                         slice_length);
+            if (buffer) {
+                replicas.emplace_back(std::move(buffer),
+                                      ReplicaStatus::PROCESSING, replica_type);
+                if (replicas.size() == replica_num) {
+                    return replicas;
+                }
+                used_segments.insert(preferred_segment);
+            }
+        }
+
+        const size_t start_idx = randomIndex(names.size());
+        size_t try_count = 0;
+        for (size_t step = 0; step < names.size() &&
+                              replicas.size() < replica_num &&
+                              try_count < kMaxRetryLimit;
+             ++step) {
+            const auto& name = names[(start_idx + step) % names.size()];
+            if (!allocator_manager.isServing(name)) {
+                continue;
+            }
+            try_count++;
+            if (excluded_segments.contains(name) ||
+                used_segments.contains(name)) {
+                continue;
+            }
+            auto buffer = allocateSingle(allocator_manager, name, slice_length);
+            if (buffer) {
+                replicas.emplace_back(std::move(buffer),
+                                      ReplicaStatus::PROCESSING, replica_type);
+            }
+        }
+
+        if (replicas.empty()) {
+            return tl::make_unexpected(ErrorCode::NO_AVAILABLE_HANDLE);
+        }
+        return replicas;
+    }
+
     static constexpr size_t kMaxRetryLimit = 100;
 };
 

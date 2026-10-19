@@ -6,6 +6,8 @@ on:
     paths:
       - "masterbench/**"
       - "mooncake-store/benchmarks/master_bench.cpp"
+      - "mooncake-store/src/master_service.cpp"
+      - "mooncake-store/include/allocation_strategy.h"
       - ".github/workflows/masterbench.yml"
   workflow_dispatch: {}
 
@@ -36,7 +38,7 @@ jobs:
           file: masterbench/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/mooncake-masterbench:292e839
+            ghcr.io/${{ github.repository_owner }}/mooncake-masterbench:latest
             ghcr.io/${{ github.repository_owner }}/mooncake-masterbench:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}

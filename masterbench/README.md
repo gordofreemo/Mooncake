@@ -37,3 +37,21 @@ cd Mooncake/masterbench/condor
 The image `ghcr.io/gordofreemo/mooncake-masterbench:292e839` is built by
 `.github/workflows/masterbench.yml`. Plots: `python3 masterbench/plot.py <results dirs>`
 (inside the image: `masterbench_plot.py`).
+
+## Patched write path (`MOONCAKE_MASTERBENCH_FAST_PUT=1`)
+
+Upstream `PutStart` does work proportional to the number of mounted segments and
+registered clients for every key: it builds the set of live clients, lists the
+serving segments twice, and copies the allocator manager. With
+`MOONCAKE_MASTERBENCH_FAST_PUT=1` in the master's environment (random allocation
+strategy only), the master
+
+- builds the live-client set only when the key already exists (the only case
+  that reads it), by rerunning the upstream path;
+- allocates from the live allocator manager under the shared segment lock, and
+  walks the segment names in place instead of copying the serving names;
+- counts serving segments only after an allocation comes back short.
+
+Placement, error codes, and eviction triggers are unchanged. The flag is off by
+default, so the same image runs both variants. `condor/submit.sh fanin-fast`
+runs E2 with it.
