@@ -42,7 +42,8 @@ look up recently written keys; the pool starts at 85\% of capacity, so eviction
 runs whenever usage passes the 90\% watermark. Rows: resident objects.
 (a)~Keys written per second; dotted: writes rejected for lack of space.
 (b)~Median and 99th-percentile lookup latency per second.
-(c)~Master CPU. Grey bands mark eviction rounds. One run per row.}
+(c)~Master CPU. Vertical lines mark the start of each eviction round; rounds
+run back to back. One run per row.}
 \label{fig:master-evict-timeline}
 """
 CAPTION_SUMMARY = r"""\caption{Full-pool operation of the upstream and patched master (E3).
@@ -50,11 +51,11 @@ CAPTION_SUMMARY = r"""\caption{Full-pool operation of the upstream and patched m
 latency. (c)~Share of written keys rejected for lack of space. One run per point.}
 \label{fig:master-evict-summary}
 """
-CAPTION_OPEN = r"""\caption{Latency of a single Mooncake master under Poisson arrivals (E5).
-Offered load is a fraction of the closed-loop capacity measured on the same node;
-latency is timed from the scheduled send, so it includes queueing. Lines: median,
-99th and 99.9th percentiles of (a)~lookups and (b)~writes (patched master),
-128 keys per call. Points are medians of three 60\,s runs.}
+CAPTION_OPEN = r"""\caption{Tail latency of a single Mooncake master under Poisson arrivals (E5).
+Offered load is a fraction of the closed-loop capacity measured first on the same
+node; latency is timed from the scheduled send, so it includes queueing. Lines:
+99th-percentile latency of (a)~lookups and (b)~writes (patched master) with 64, 128
+or 256 open-loop clients, 128 keys per call. Points are medians of three 60\,s runs.}
 \label{fig:master-open-loop}
 """
 CAPTION_CONTEND = r"""\caption{Lookup latency when other work shares the cores (E4).
@@ -146,10 +147,12 @@ def load_e3(roots):
             tl = read_jsonl(job / "timeline.jsonl")
             for row in tl:
                 row["variant"] = variant
+            tl = [r for r in tl if r["tag"].startswith("evict_")]
             timelines += tl
             for row in read_jsonl(job / "results.jsonl"):
-                row["variant"] = variant
-                results.append(row)
+                if row["tag"].startswith("evict_"):
+                    row["variant"] = variant
+                    results.append(row)
             if tl:
                 year = datetime.fromtimestamp(tl[0]["t"], timezone.utc).year
                 for tag in {r["tag"] for r in tl}:
@@ -170,9 +173,12 @@ def plot_e3_timeline(tl, rounds, out):
         mixed = sub[(sub["tag"] == tag) & (sub["role"] == "mixed")].sort_values("sec")
         t0 = main["t"].min() - main["sec"].min()
         ax_w, ax_l, ax_c = axes[row]
+        last = main["sec"].max()
         for ax in (ax_w, ax_l, ax_c):
-            for start, end in rounds.get((variant, tag), []):
-                ax.axvspan(start - t0, max(end - t0, start - t0 + 0.15), color="0.85", lw=0, zorder=0)
+            for start, _end in rounds.get((variant, tag), []):
+                if 0 <= start - t0 <= last:
+                    ax.axvline(start - t0, color="0.55", lw=0.5, ls=(0, (1, 1.5)), zorder=0)
+            ax.set_xlim(0, last)
         ax_w.plot(main["sec"], main["keys_ok"], color=PUT["color"], lw=0.9)
         ax_w.plot(main["sec"], main["keys_no_space"], color=PUT["color"], lw=0.8, ls=":")
         ax_w.set_ylim(bottom=0)
@@ -203,7 +209,7 @@ def plot_e3_timeline(tl, rounds, out):
             Line2D([0], [0], color=PUT["color"], ls=":", label="rejected"),
             Line2D([0], [0], color=GET["color"], label="lookup p50"),
             Line2D([0], [0], color=GET["color"], ls="--", label="lookup p99"),
-            plt.Rectangle((0, 0), 1, 1, color="0.85", label="eviction round")]
+            Line2D([0], [0], color="0.55", lw=0.5, ls=(0, (1, 1.5)), label="eviction round starts")]
     fig.legend(handles=keys, loc="lower center", bbox_to_anchor=(0.5, 0.995), ncol=5,
                frameon=False, handlelength=2.0, columnspacing=1.2, borderaxespad=0)
     save(fig, out, "fig_evict_timeline", CAPTION_TIMELINE)
@@ -235,11 +241,10 @@ def plot_e3_summary(res, out):
         ax.xaxis.set_major_formatter(FuncFormatter(si))
         ax.xaxis.set_minor_formatter(NullFormatter())
         ax.set_xlabel("Resident objects")
-    axes[0].set_yscale("log")
+    axes[0].set_ylim(bottom=0)
     axes[0].yaxis.set_major_formatter(FuncFormatter(si))
     axes[0].set_ylabel("Writes (keys/s)")
-    axes[1].set_yscale("log")
-    axes[1].yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}"))
+    axes[1].set_ylim(bottom=0)
     axes[1].set_ylabel("Lookup p99 (ms)")
     axes[2].set_ylim(0, 100)
     axes[2].set_ylabel("Rejected writes (%)")
@@ -294,22 +299,37 @@ def plot_e5(roots, out, lines):
         return
     df["load"] = df["tag"].map(fraction_of)
     df["op"] = np.where(df["tag"].str.startswith("openget"), "Get", "Put")
+    shades = {64: 0.45, 128: 0.7, 256: 1.0}
+    markers = {64: "^", 128: "s", 256: "o"}
     fig, axes = plt.subplots(1, 2, figsize=(7.0, 1.85))
     fig.subplots_adjust(wspace=0.3)
+    counts = sorted(df["num_clients"].unique())
     for ax, (op, st) in zip(axes, (("Get", GET), ("Put", PUT))):
-        sub = df[df["op"] == op]
-        if sub.empty:
-            continue
-        agg = latency_lines(ax, sub, "load", st)
-        ax.set_xlabel("Offered load (fraction of capacity)")
-        ax.set_ylabel("Latency (ms)")
+        for n in counts:
+            sub = df[(df["op"] == op) & (df["num_clients"] == n)]
+            if sub.empty:
+                continue
+            agg = sub.groupby("load").agg(
+                p50=("lat_p50_ms", "median"), p99=("lat_p99_ms", "median"),
+                p999=("lat_p999_ms", "median"),
+                ratio=("calls_per_s", "median"), offered=("offered_calls_per_s", "median"),
+                cpu=("master_cpu_pct", "median")).reset_index().sort_values("load")
+            color = matplotlib.colors.to_rgba(st["color"], shades.get(n, 1.0))
+            ax.plot(agg["load"], agg["p99"], color=color, marker=markers.get(n, "o"),
+                    label=f"{n} clients")
+            lines.append(f"E5 {op} {n} clients: " + ", ".join(
+                f"load {r.load:g}: p50 {r.p50:.2f} p99 {r.p99:.2f} p99.9 {r.p999:.2f} ms, "
+                f"achieved {r.ratio / r.offered:.2f}, master {r.cpu:.0f}%"
+                for r in agg.itertuples()))
+        ax.set_yscale("log")
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}"))
+        ax.yaxis.set_minor_formatter(NullFormatter())
         ax.set_xlim(0, 1)
-        ach = sub.groupby("load").apply(lambda g: (g["calls_per_s"] / g["offered_calls_per_s"]).median())
-        lines.append(f"E5 {op}: " + ", ".join(
-            f"load {r.load:g}: p50 {r.p50:.2f} p99 {r.p99:.2f} p99.9 {r.p999:.2f} ms"
-            for r in agg.itertuples()) + "; achieved/offered " +
-            ", ".join(f"{v:.3f}" for v in ach.values))
-    percentile_legend(axes[0])
+        ax.set_xlabel("Offered load (fraction of capacity)")
+        ax.set_ylabel("p99 latency (ms)")
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(loc="upper left", frameon=False, handlelength=2.0, borderaxespad=0.3,
+                      labelspacing=0.3)
     for ax, label in zip(axes, ("(a) Lookups", "(b) Writes")):
         panel_label(ax, label, y=-0.36)
     save(fig, out, "fig_open_loop", CAPTION_OPEN)
@@ -373,14 +393,22 @@ def main():
         plot_e3_summary(res, out)
         for r in res[res["role"] == "main"].itertuples():
             g = res[(res["role"] == "mixed") & (res["tag"] == r.tag) & (res["variant"] == r.variant)]
-            n_rounds = len(rounds.get((r.variant, r.tag), []))
+            rr = rounds.get((r.variant, r.tag), [])
+            n_rounds = len(rr)
+            m = tl[(tl["tag"] == r.tag) & (tl["variant"] == r.variant) & (tl["role"] == "main")]
+            g_tl = tl[(tl["tag"] == r.tag) & (tl["variant"] == r.variant) & (tl["role"] == "mixed")]
+            med = m["keys_ok"].median()
+            stall_s = int((m["keys_ok"] < 0.1 * med).sum())
+            round_s = np.mean([e - b for b, e in rr]) if rr else 0.0
             lines.append(
                 f"E3 {r.variant} {r.tag}: writes {r.keys_per_s:,.0f} keys/s, rejected "
                 f"{r.keys_no_space:,} of {r.keys_ok + r.keys_err:,}, write p99 {r.lat_p99_ms:.1f} ms; "
                 + (f"lookup p50 {g.iloc[0].lat_p50_ms:.2f} p99 {g.iloc[0].lat_p99_ms:.2f} "
                    f"max {g.iloc[0].lat_max_ms:.1f} ms, not found {g.iloc[0].keys_not_found:,}; "
                    if not g.empty else "")
-                + f"eviction rounds {n_rounds}; master CPU {r.master_cpu_pct:.0f}%")
+                + f"eviction rounds {n_rounds} (mean {round_s:.1f} s); seconds with writes <10% of median "
+                f"{stall_s}/{len(m)}; worst 1-s lookup p99 {g_tl['p99_ms'].max():.1f} ms; "
+                f"lookups ok {g.iloc[0].keys_ok if not g.empty else 0:,}; master CPU {r.master_cpu_pct:.0f}%")
     plot_e4(roots, out, lines)
     plot_e5(roots, out, lines)
 
