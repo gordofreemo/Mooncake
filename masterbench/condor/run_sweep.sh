@@ -94,6 +94,7 @@ bench() {
         --prefill_threads="$PREFILL_THREADS" \
         --master_pid="$MPID" \
         --result_tag="$tag" \
+        ${TIMELINE:+--timeline=true} \
         "$@" 2>>"$LOCAL/bench_$tag.log" > "$LOCAL/stdout_$tag.log" ||
         echo "master_bench $tag exited with $?" >> "$OUT/env.txt"
     collect "$tag"

@@ -46,6 +46,9 @@ elif [ "$BASE" = open ]; then
     ENV="SEGMENTS=32 REPEATS=3 DURATION=60 WARMUP=5 PAUSE=5"
     JOBS="OpenGet ${NODE1:-magni2} openget PREFILL=10000000$FASTENV
 OpenPut ${NODE1:-magni2} openput PREFILL=1000000$FASTENV"
+elif [ "$BASE" = openput-diag ]; then
+    ENV="SEGMENTS=32 REPEATS=1 DURATION=120 WARMUP=5 PAUSE=5 PREFILL=1000000 LOADS=0.3 OPEN_CLIENTS=128 TIMELINE=1"
+    JOBS="OpenPut ${NODE1:-wali1} openput$FASTENV"
 elif [ "$BASE" = contend ]; then
     ENV="SEGMENTS=32 REPEATS=3 DURATION=30 WARMUP=5 PAUSE=5 PREFILL=10000000 CLIENT_CORES=16-31 RATE=5000"
     JOBS="Contend ${NODE1:-magni2} contend$FASTENV"
@@ -67,6 +70,8 @@ else
 BatchPut magni2 put"
 fi
 ENV="$ENV$FAST${EXTRA_ENV:+ $EXTRA_ENV}"
+# Later assignments win (EXTRA_ENV and per-job extras override mode defaults).
+dedupe_env() { tr ' ' '\n' | awk -F= 'NF { v[$1] = $0; if (!($1 in seen)) { seen[$1] = 1; k[++n] = $1 } } END { for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? " " : ""), v[k[i]] }'; }
 
 while read -r op node name extra; do
     mkdir -p "$OUT/$name"
@@ -76,7 +81,7 @@ docker_image   = $IMAGE
 +WantGPUHomeMounted = true
 executable     = $HERE/run_sweep.sh
 arguments      = $op $OUT/$name
-environment    = "$ENV${extra:+ $extra}"
+environment    = "$(echo "$ENV${extra:+ $extra}" | dedupe_env)"
 requirements   = (Machine == "$node.hpc.uni-saarland.de")
 request_cpus   = ${REQUEST_CPUS:-192}
 request_memory = ${REQUEST_MEMORY:-256GB}
