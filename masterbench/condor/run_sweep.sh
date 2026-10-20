@@ -125,7 +125,9 @@ start_stress() {
     n=$(taskset -c "$cores" python3 -c 'import os; print(len(os.sched_getaffinity(0)))')
     SPID=""
     if [ "$per_core" -gt 0 ]; then
-        stress-ng --cpu $((per_core * n)) --cpu-method int64 --taskset "$cores" \
+        # Own process group: stress-ng ignores SIGTERM and SIGINT here, so it
+        # is stopped with SIGKILL to the whole group.
+        setsid stress-ng --cpu $((per_core * n)) --cpu-method int64 --taskset "$cores" \
             --quiet > "$LOCAL/stress.log" 2>&1 &
         SPID=$!
         sleep 2
@@ -133,7 +135,7 @@ start_stress() {
 }
 stop_stress() {
     if [ -n "$SPID" ]; then
-        kill -TERM "$SPID" 2>/dev/null || true
+        kill -KILL -- "-$SPID" 2>/dev/null || kill -KILL "$SPID" 2>/dev/null || true
         wait "$SPID" 2>/dev/null || true
         SPID=""
     fi
