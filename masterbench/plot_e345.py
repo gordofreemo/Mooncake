@@ -42,13 +42,14 @@ look up recently written keys; the pool starts at 85\% of capacity, so eviction
 runs whenever usage passes the 90\% watermark. Rows: resident objects.
 (a)~Keys written per second; dotted: writes rejected for lack of space.
 (b)~Median and 99th-percentile lookup latency per second.
-(c)~Master CPU. Vertical lines mark the start of each eviction round; rounds
-run back to back. One run per row.}
+(c)~Master CPU. Vertical lines mark the start of each eviction round (omitted
+where rounds are shorter than a second); rounds run back to back. One run per row.}
 \label{fig:master-evict-timeline}
 """
 CAPTION_SUMMARY = r"""\caption{Full-pool operation of the upstream and patched master (E3).
-(a)~Keys written per second over the 180\,s window. (b)~99th-percentile lookup
-latency. (c)~Share of written keys rejected for lack of space. One run per point.}
+(a)~Keys written per second over the 180\,s window. (b)~Worst one-second
+99th-percentile lookup latency. (c)~Share of written keys rejected for lack of
+space. One run per point.}
 \label{fig:master-evict-summary}
 """
 CAPTION_OPEN = r"""\caption{Tail latency of a single Mooncake master under Poisson arrivals (E5).
@@ -174,10 +175,11 @@ def plot_e3_timeline(tl, rounds, out):
         t0 = main["t"].min() - main["sec"].min()
         ax_w, ax_l, ax_c = axes[row]
         last = main["sec"].max()
+        starts = [b - t0 for b, _e in rounds.get((variant, tag), []) if 0 <= b - t0 <= last]
         for ax in (ax_w, ax_l, ax_c):
-            for start, _end in rounds.get((variant, tag), []):
-                if 0 <= start - t0 <= last:
-                    ax.axvline(start - t0, color="0.55", lw=0.5, ls=(0, (1, 1.5)), zorder=0)
+            if len(starts) <= 40:
+                for start in starts:
+                    ax.axvline(start, color="0.55", lw=0.5, ls=(0, (1, 1.5)), zorder=0)
             ax.set_xlim(0, last)
         ax_w.plot(main["sec"], main["keys_ok"], color=PUT["color"], lw=0.9)
         ax_w.plot(main["sec"], main["keys_no_space"], color=PUT["color"], lw=0.8, ls=":")
@@ -195,7 +197,10 @@ def plot_e3_timeline(tl, rounds, out):
         ax_c.set_ylim(0, 17)
         ax_c.set_ylabel("Master cores")
         res = resident_of(tag)
-        ax_w.text(0.02, 0.92, f"{si(res)} objects" if res else tag, transform=ax_w.transAxes,
+        label = f"{si(res)} objects" if res else tag
+        if len(starts) > 40:
+            label += f", {len(starts)} rounds"
+        ax_w.text(0.02, 0.92, label, transform=ax_w.transAxes,
                   fontsize=7, va="top", ha="left",
                   bbox=dict(facecolor="white", edgecolor="none", pad=0.6, alpha=0.8))
         for ax in (ax_w, ax_l, ax_c):
@@ -215,7 +220,7 @@ def plot_e3_timeline(tl, rounds, out):
     save(fig, out, "fig_evict_timeline", CAPTION_TIMELINE)
 
 
-def plot_e3_summary(res, out):
+def plot_e3_summary(res, tl, out):
     main = res[res["role"] == "main"].copy()
     mixed = res[res["role"] == "mixed"].copy()
     for df in (main, mixed):
@@ -226,13 +231,15 @@ def plot_e3_summary(res, out):
     fig.subplots_adjust(wspace=0.45)
     for variant, st in VARIANT.items():
         m = main[main["variant"] == variant].sort_values("resident")
-        g = mixed[mixed["variant"] == variant].sort_values("resident")
         if m.empty:
             continue
+        g = tl[(tl["variant"] == variant) & (tl["role"] == "mixed")].copy()
+        g["resident"] = g["tag"].map(resident_of)
+        worst = g.groupby("resident")["p99_ms"].max().reset_index().sort_values("resident")
         kw = dict(color=st["color"], marker=st["marker"])
         axes[0].plot(m["resident"], m["keys_per_s"], **kw)
-        if not g.empty:
-            axes[1].plot(g["resident"], g["lat_p99_ms"], **kw)
+        if not worst.empty:
+            axes[1].plot(worst["resident"], worst["p99_ms"], **kw)
         axes[2].plot(m["resident"], m["rejected_pct"], **kw)
     counts = sorted(main["resident"].dropna().unique())
     for ax in axes:
@@ -244,8 +251,10 @@ def plot_e3_summary(res, out):
     axes[0].set_ylim(bottom=0)
     axes[0].yaxis.set_major_formatter(FuncFormatter(si))
     axes[0].set_ylabel("Writes (keys/s)")
-    axes[1].set_ylim(bottom=0)
-    axes[1].set_ylabel("Lookup p99 (ms)")
+    axes[1].set_yscale("log")
+    axes[1].yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}"))
+    axes[1].yaxis.set_minor_formatter(NullFormatter())
+    axes[1].set_ylabel("Worst 1-s lookup p99 (ms)")
     axes[2].set_ylim(0, 100)
     axes[2].set_ylabel("Rejected writes (%)")
     for ax, label in zip(axes, ("(a) Write throughput", "(b) Lookup tail", "(c) Rejected writes")):
@@ -390,7 +399,7 @@ def main():
     tl, res, rounds = load_e3(roots)
     if not tl.empty:
         plot_e3_timeline(tl, rounds, out)
-        plot_e3_summary(res, out)
+        plot_e3_summary(res, tl, out)
         for r in res[res["role"] == "main"].itertuples():
             g = res[(res["role"] == "mixed") & (res["tag"] == r.tag) & (res["variant"] == r.variant)]
             rr = rounds.get((r.variant, r.tag), [])
