@@ -120,7 +120,8 @@ PY
 SPID=""
 start_stress() {
     local per_core=$1 cores=$2 n
-    n=$(taskset -c "$cores" nproc)
+    # nproc would honour OMP_NUM_THREADS, which HTCondor sets to request_cpus.
+    n=$(taskset -c "$cores" python3 -c 'import os; print(len(os.sched_getaffinity(0)))')
     SPID=""
     if [ "$per_core" -gt 0 ]; then
         stress-ng --cpu $((per_core * n)) --cpu-method int64 --taskset "$cores" \
@@ -239,6 +240,7 @@ case "$OP" in
             if [ "$side" = master ]; then cores=$MASTER_CORES; fi
             for k in "${LEVEL_LIST[@]}"; do
                 tag="contend_${side}_k${k}"
+                : > "$LOCAL/bench_$tag.log"
                 start_master "$tag"
                 # Load the cores only once segments are mounted and the keys
                 # preloaded, i.e. from the first point's warm-up on.
@@ -247,6 +249,7 @@ case "$OP" in
                 BPID=$!
                 for _ in $(seq 1 600); do
                     grep -q "Point clients=" "$LOCAL/bench_$tag.log" 2>/dev/null && break
+                    kill -0 "$BPID" 2>/dev/null || break
                     sleep 1
                 done
                 start_stress "$k" "$cores"
