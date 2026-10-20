@@ -344,6 +344,44 @@ def plot_e5(roots, out, lines):
     save(fig, out, "fig_open_loop", CAPTION_OPEN)
 
 
+def plot_write_timeline(roots, out, lines):
+    """Per-second write latency of an open-loop run with --timeline (stall diagnosis)."""
+    rows = []
+    for root in roots:
+        for path in sorted(root.rglob("timeline.jsonl")):
+            rows += [r for r in read_jsonl(path) if r["tag"].startswith("openput_")]
+    if not rows:
+        return
+    df = pd.DataFrame(rows).sort_values("sec")
+    fig, (ax_t, ax_l) = plt.subplots(1, 2, figsize=(7.0, 1.8))
+    fig.subplots_adjust(wspace=0.3)
+    ax_t.plot(df["sec"], df["keys_ok"], color=PUT["color"], lw=0.9)
+    ax_t.set_ylim(bottom=0)
+    ax_t.yaxis.set_major_formatter(FuncFormatter(si))
+    ax_t.set_ylabel("Keys written/s")
+    ax_l.plot(df["sec"], df["p50_ms"], color=PUT["color"], lw=0.9)
+    ax_l.plot(df["sec"], df["p99_ms"], color=PUT["color"], lw=0.9, ls="--")
+    ax_l.set_yscale("log")
+    ax_l.yaxis.set_major_formatter(FuncFormatter(lambda v, _p: f"{v:g}"))
+    ax_l.yaxis.set_minor_formatter(NullFormatter())
+    ax_l.set_ylabel("Write latency (ms)")
+    for ax in (ax_t, ax_l):
+        ax.set_xlabel("Time (s)")
+        ax.set_xlim(0, df["sec"].max())
+    percentile_legend_2 = [Line2D([0], [0], color=PUT["color"], ls="-", label="p50"),
+                           Line2D([0], [0], color=PUT["color"], ls="--", label="p99")]
+    ax_l.legend(handles=percentile_legend_2, loc="upper left", frameon=False, handlelength=2.0)
+    for ax, label in zip((ax_t, ax_l), ("(a) Throughput", "(b) Latency per second")):
+        panel_label(ax, label, y=-0.36)
+    save(fig, out, "fig_openput_timeline", r"""\caption{Open-loop writes at 30\% of capacity, per second (patched master).}
+\label{fig:master-openput-timeline}
+""")
+    slow = df[df["p99_ms"] > 10 * df["p99_ms"].median()]
+    lines.append(f"Write timeline {df['tag'].iloc[0]}: median 1-s p99 {df['p99_ms'].median():.1f} ms; "
+                 f"seconds with p99 > 10x median: {len(slow)}/{len(df)} at s={list(slow['sec'])[:20]}; "
+                 f"max 1-s p99 {df['p99_ms'].max():.0f} ms; ping failures {df['ping_failures_total'].max() if 'ping_failures_total' in df else 'n/a'}")
+
+
 # --- E4 -----------------------------------------------------------------------
 
 def plot_e4(roots, out, lines):
@@ -419,7 +457,8 @@ def main():
                 f"{stall_s}/{len(m)}; worst 1-s lookup p99 {g_tl['p99_ms'].max():.1f} ms; "
                 f"lookups ok {g.iloc[0].keys_ok if not g.empty else 0:,}; master CPU {r.master_cpu_pct:.0f}%")
     plot_e4(roots, out, lines)
-    plot_e5(roots, out, lines)
+    plot_e5([r for r in roots if "openput-diag" not in str(r)], out, lines)
+    plot_write_timeline(roots, out, lines)
 
     # --- Save ---
     (out / "e345_summary.txt").write_text("\n".join(lines) + "\n")
