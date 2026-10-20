@@ -137,6 +137,10 @@ static uint64_t ProcRssBytes(int64_t pid) {
     return 0;
 }
 
+// Heartbeats (Ping) that failed, e.g. by RPC timeout. Counted rather than
+// fatal, so a master stall shows up in the results instead of ending the run.
+static std::atomic<uint64_t> gPingFailures = 0;
+
 class SegmentClient {
    public:
     SegmentClient(const std::string& name, const std::string& master_server,
@@ -181,7 +185,9 @@ class SegmentClient {
 
         auto ping_result = master_client_.Ping();
         if (!ping_result.has_value()) {
-            throw std::runtime_error("Failed to ping master server");
+            gPingFailures.fetch_add(1);
+            LOG(WARNING) << "Ping failed for segment " << segment_.name;
+            return;
         }
 
         if (ping_result.value().client_status ==
@@ -190,7 +196,9 @@ class SegmentClient {
             remount_future_ = std::async(std::launch::async, [&]() {
                 auto remount_ec = master_client_.ReMountSegment({segment_});
                 if (!remount_ec.has_value()) {
-                    throw std::runtime_error("Failed to remount segment");
+                    gPingFailures.fetch_add(1);
+                    LOG(WARNING) << "Remount failed for segment "
+                                 << segment_.name;
                 }
             });
         }
@@ -739,7 +747,8 @@ static void PrintResult(const char* operation, const char* role,
          << (latencies.empty() ? 0.0 : latencies.back() / 1000.0)
          << ",\"master_cpu_pct\":" << master_cpu_pct
          << ",\"client_cpu_pct\":" << client_cpu_pct
-         << ",\"master_rss_start\":" << master_rss_start << "}";
+         << ",\"master_rss_start\":" << master_rss_start
+         << ",\"ping_failures_total\":" << gPingFailures.load() << "}";
     std::cout << "RESULT " << json.str() << std::endl;
 }
 
@@ -777,7 +786,8 @@ static void PrintTimeline(const char* operation, const char* role,
          << ",\"max_ms\":"
          << (latencies.empty() ? 0.0 : latencies.back() / 1000.0)
          << ",\"master_cpu_pct\":" << master_cpu_pct
-         << ",\"master_rss\":" << master_rss << "}";
+         << ",\"master_rss\":" << master_rss
+         << ",\"ping_failures_total\":" << gPingFailures.load() << "}";
     std::cout << "TIMELINE " << json.str() << std::endl;
     previous = current;
 }

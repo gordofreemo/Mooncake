@@ -24,6 +24,10 @@ PORT=${PORT:-50051}
 
 mkdir -p "$OUT"
 RESULTS="$OUT/results.jsonl"
+# Logs are written to local disk and copied to $OUT after each point, so a
+# stall of the shared home file system cannot block the master or the bench.
+LOCAL=${_CONDOR_SCRATCH_DIR:-/tmp}/masterbench
+mkdir -p "$LOCAL"
 ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
 {
     echo "host=$(hostname) date=$(date -Is) op=$OP"
@@ -37,11 +41,13 @@ ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
 } > "$OUT/env.txt"
 
 MPID=""
+MTAG=""
 start_master() {
+    MTAG=$1
     taskset -c "$MASTER_CORES" mooncake_master \
         --port="$PORT" \
         --rpc_thread_num="$RPC_THREADS" \
-        > "$OUT/master_$1.log" 2>&1 &
+        > "$LOCAL/master_$1.log" 2>&1 &
     MPID=$!
     for _ in $(seq 1 120); do
         if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
@@ -60,6 +66,7 @@ stop_master() {
         kill "$MPID" 2>/dev/null || true
         wait "$MPID" 2>/dev/null || true
         MPID=""
+        cp "$LOCAL/master_$MTAG.log" "$OUT/" 2>/dev/null || true
         sleep 2
     fi
 }
@@ -87,10 +94,17 @@ bench() {
         --prefill_threads="$PREFILL_THREADS" \
         --master_pid="$MPID" \
         --result_tag="$tag" \
-        "$@" 2>>"$OUT/bench_$tag.log" > "$OUT/stdout_$tag.log" ||
+        "$@" 2>>"$LOCAL/bench_$tag.log" > "$LOCAL/stdout_$tag.log" ||
         echo "master_bench $tag exited with $?" >> "$OUT/env.txt"
-    sed -n 's/^RESULT //p' "$OUT/stdout_$tag.log" >> "$RESULTS"
-    sed -n 's/^TIMELINE //p' "$OUT/stdout_$tag.log" >> "$OUT/timeline.jsonl"
+    collect "$tag"
+}
+
+# Copy a point's logs to $OUT and append its RESULT and TIMELINE lines.
+collect() {
+    local tag=$1
+    cp "$LOCAL/bench_$tag.log" "$LOCAL/stdout_$tag.log" "$OUT/" 2>/dev/null || true
+    sed -n 's/^RESULT //p' "$LOCAL/stdout_$tag.log" >> "$RESULTS"
+    sed -n 's/^TIMELINE //p' "$LOCAL/stdout_$tag.log" >> "$OUT/timeline.jsonl"
 }
 
 # Largest calls_per_s among the RESULT lines tagged $1.
@@ -110,7 +124,7 @@ start_stress() {
     SPID=""
     if [ "$per_core" -gt 0 ]; then
         stress-ng --cpu $((per_core * n)) --cpu-method int64 --taskset "$cores" \
-            --quiet > "$OUT/stress.log" 2>&1 &
+            --quiet > "$LOCAL/stress.log" 2>&1 &
         SPID=$!
         sleep 2
     fi
@@ -224,10 +238,19 @@ case "$OP" in
             cores=$CLIENT_CORES
             if [ "$side" = master ]; then cores=$MASTER_CORES; fi
             for k in "${LEVEL_LIST[@]}"; do
-                start_master "contend_${side}_k${k}"
+                tag="contend_${side}_k${k}"
+                start_master "$tag"
+                # Load the cores only once segments are mounted and the keys
+                # preloaded, i.e. from the first point's warm-up on.
+                bench "$tag" BatchGet "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="${ACTIVE:-16}" \
+                    --repeats="$REPEATS" --pause="$PAUSE" --open_loop_rate="$RATE" &
+                BPID=$!
+                for _ in $(seq 1 600); do
+                    grep -q "Point clients=" "$LOCAL/bench_$tag.log" 2>/dev/null && break
+                    sleep 1
+                done
                 start_stress "$k" "$cores"
-                bench "contend_${side}_k${k}" BatchGet "$SEGMENTS" "$SEGMENT_SIZE" --clients_list="${ACTIVE:-16}" \
-                    --repeats="$REPEATS" --pause="$PAUSE" --open_loop_rate="$RATE"
+                wait "$BPID" || true
                 stop_stress
                 stop_master
             done
