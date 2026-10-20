@@ -10,7 +10,8 @@
 # open: E5, open-loop lookups and writes. contend: E4, lookups under stress-ng.
 # e345-smoke: short versions of E3 (patched), E4 and E5 on one node.
 # Each JOBS line is "op node name [extra environment]".
-# IMAGE, REQUEST_CPUS and REQUEST_MEMORY override the job settings.
+# IMAGE, REQUEST_CPUS and REQUEST_MEMORY override the job settings; NODE1
+# picks the node and EXTRA_ENV adds environment variables to every job.
 set -euo pipefail
 MODE=${1:-smoke}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -65,7 +66,7 @@ else
     JOBS="BatchGet magni1 get
 BatchPut magni2 put"
 fi
-ENV="$ENV$FAST"
+ENV="$ENV$FAST${EXTRA_ENV:+ $EXTRA_ENV}"
 
 while read -r op node name extra; do
     mkdir -p "$OUT/$name"
