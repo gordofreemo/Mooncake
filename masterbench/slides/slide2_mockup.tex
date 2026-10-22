@@ -1,0 +1,70 @@
+% Slide 2 mockup (16:9): how Mooncake's master manages metadata.
+% Build: lualatex slide2_mockup.tex
+\documentclass{article}
+\usepackage{fontspec}
+\setsansfont{Helvetica}
+\setmonofont{Menlo}[Scale=0.9]
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta}
+\usepackage{enumitem}
+\pagestyle{empty}
+\definecolor{rpc}{HTML}{B2182B}
+\definecolor{subtext}{gray}{0.35}
+\begin{document}
+\setbox0=\hbox{%
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \path[use as bounding box] (0,0) rectangle (25.4,14.29);
+  \fill[white] (0,0) rectangle (25.4,14.29);
+
+  % Title
+  \node[anchor=north west, font=\fontsize{21}{25}\selectfont\bfseries] at (1.0,13.5)
+    {Mooncake keeps all KV-cache metadata in one master process};
+
+  % Text column
+  \node[anchor=north west, text width=13.2cm, font=\fontsize{12.5}{15.5}\selectfont] at (1.0,11.6) {%
+    \begin{itemize}[leftmargin=0.5cm, itemsep=7pt, topsep=0pt, parsep=0pt, label=\textbullet]
+      \item \textbf{Index.} An in-memory map from every object's key to its replicas
+            (node, segment, offset), status, and read-lease expiry: about 1\,KB per key,
+            split into 1,024 lock-protected shards.
+      \item \textbf{Writes: two calls.} \texttt{PutStart} picks a segment and allocates
+            space; the client copies the data by RDMA; \texttt{PutEnd} marks the object complete.
+      \item \textbf{Lookups: two calls per cache hit.} \texttt{ExistKey}, then
+            \texttt{GetReplicaList}, which returns the locations and grants a 10\,s read lease.
+      \item \textbf{Membership.} Storage nodes register their memory segments and send a
+            heartbeat every second; a node silent for 10\,s is dropped.
+      \item \textbf{Eviction.} Above 90\% pool use, a background thread scans every key
+            and evicts 5\% of objects, oldest lease first.
+    \end{itemize}};
+  \node[anchor=south west, font=\fontsize{9.5}{11.5}\selectfont, text=subtext] at (1.0,0.7)
+    {Defaults at Mooncake commit 292e839; memory per key measured in our runs. Optional HA: standby masters elected through etcd replay an operation log.};
+
+  % Diagram: inside the master
+  \tikzset{part/.style={draw=black, line width=0.6pt, rounded corners=1.5pt, fill=white,
+                        align=center, minimum width=7.6cm, font=\fontsize{10.5}{12.5}\selectfont}}
+  \node[draw=rpc!85!black, line width=0.9pt, rounded corners=2.5pt, fill=rpc!6,
+        minimum width=8.6cm, minimum height=8.0cm, anchor=north] (m) at (19.6,10.9) {};
+  \node[anchor=north, font=\fontsize{12}{14}\selectfont\bfseries] at (19.6,10.75) {Metadata master};
+  \node[part, minimum height=0.8cm] (rpcth) at (19.6,9.55) {RPC threads};
+  \node[part, minimum height=1.6cm] (idx) at (19.6,8.05)
+    {\textbf{Object index}, 1,024 shards\\[2pt]
+     {\fontsize{9.5}{11.5}\selectfont\color{subtext} key $\rightarrow$ replicas (node, segment, offset)}\\[-1pt]
+     {\fontsize{9.5}{11.5}\selectfont\color{subtext} status, read-lease expiry}};
+  \node[part, minimum height=1.05cm] (alloc) at (19.6,6.5)
+    {\textbf{Segment allocator}\\[-1pt]{\fontsize{9.5}{11.5}\selectfont\color{subtext} free space in every registered segment}};
+  \node[part, minimum height=1.05cm] (ctab) at (19.6,5.25)
+    {\textbf{Client table}\\[-1pt]{\fontsize{9.5}{11.5}\selectfont\color{subtext} heartbeats, 10\,s timeout}};
+  \node[part, minimum height=1.05cm] (evict) at (19.6,4.0)
+    {\textbf{Eviction thread}\\[-1pt]{\fontsize{9.5}{11.5}\selectfont\color{subtext} above 90\% full: scan all keys, evict 5\%}};
+
+  % Incoming RPCs from every node
+  \draw[-{Stealth[length=6pt,width=5pt]}, line width=1.0pt, draw=rpc] (19.6,11.85) -- (m.north);
+  \node[anchor=south, font=\fontsize{10.5}{12.5}\selectfont, align=center] at (19.6,11.85)
+    {calls from every prefill and storage node};
+\end{tikzpicture}}%
+\pdfvariable horigin=0pt
+\pdfvariable vorigin=0pt
+\pagewidth=\wd0
+\pageheight=\dimexpr\ht0+\dp0\relax
+\shipout\box0
+\end{document}
