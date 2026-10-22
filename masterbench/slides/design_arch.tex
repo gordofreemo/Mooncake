@@ -1,5 +1,5 @@
 % Proposed design: per-node metadata managers on BlueField-3 DPUs,
-% node-local consistency, eventually consistent directory, GPU-initiated I/O,
+% node-local consistency, eventually consistent directory, lookups from the host scheduler,
 % and recompute-while-loading (compute from the front, load from the back).
 % Companion to request_path.tex (same styles and colours).
 % Build: lualatex design_arch.tex   (system Helvetica via fontspec)
@@ -52,13 +52,14 @@
   \node[comp, minimum width=3.4cm, minimum height=0.85cm] (dir#2) at (#1,1.45)
     {\footnotesize Directory replica\\[-1pt]{\scriptsize\color{subtext}eventually consistent}};
 }
-% KV pool and host CPU: #1 = x of the column centre, #2 = node letter, #3 = host CPU role
-\newcommand{\hostcol}[3]{%
+% KV pool and host CPU: #1 = x of the column centre, #2 = node letter, #3 = host CPU role,
+% #4 = host CPU box style
+\newcommand{\hostcol}[4]{%
   \node[comp, minimum width=2.6cm, minimum height=1.35cm] (pool#2) at (#1,2.75) {};
   \node[anchor=north, align=center, inner sep=2.5pt] at (pool#2.north)
     {\footnotesize KV pool\\[-1pt]{\scriptsize\color{subtext}DRAM / SSD}};
   \foreach \c in {0,...,4} { \node[blk] (blk#2\c) at (#1-0.84+\c*0.42,2.375) {}; }
-  \node[offpath, minimum width=2.6cm, minimum height=1.0cm] (cpu#2) at (#1,0.85)
+  \node[#4, minimum width=2.6cm, minimum height=1.0cm] (cpu#2) at (#1,0.85)
     {\footnotesize Host CPU\\[-1pt]{\scriptsize #3}};
 }
 
@@ -69,7 +70,7 @@
   % --- Node A (requester) ------------------------------------------------------
   \draw[nodebox] (0,0) rectangle (7.5,6.4);
   \node[ttl] at (3.75,6.15) {Node A (requester)};
-  \hostcol{1.45}{A}{scheduling only}
+  \hostcol{1.45}{A}{\color{subtext}scheduler}{comp}
   \dpu{5.3}{A}
   % GPU: the prefix's KV is recomputed from the front and fetched from the back
   \node[comp, minimum width=2.6cm, minimum height=1.6cm] (gpuA) at (1.45,5.05) {};
@@ -83,15 +84,15 @@
   \draw[nodebox] (10.4,0) rectangle (17.9,6.4);
   \node[ttl] at (14.15,6.15) {Node B (holds the prefix)};
   \dpu{12.6}{B}
-  \hostcol{16.45}{B}{not involved}
+  \hostcol{16.45}{B}{not involved}{offpath}
   \node[comp, minimum width=2.6cm, minimum height=1.6cm] (gpuB) at (16.45,5.05)
     {\footnotesize GPU\\[-1pt]{\scriptsize\color{subtext}prefill}};
   \foreach \c in {0,1,2} { \node[kvblk] (kvB\c) at (blkB\c) {}; }
 
-  % --- (1a) the GPU submits the lookup to its own DPU ---------------------------
-  \draw[metaline] (2.3,4.25) -- (2.3,4.0) -- (3.45,4.0);
-  \node[step=rpc] at (3.0,4.0) {1a};
-  \node[font=\footnotesize, text=rpc!85!black, anchor=east, inner sep=1.5pt] at (2.23,4.0) {lookup};
+  % --- (1a) the scheduler sends the lookup to its own DPU -----------------------
+  \draw[metaline] (2.3,1.35) -- (2.3,1.7) -- (3.45,1.7);
+  \node[step=rpc] at (3.0,1.7) {1a};
+  \node[font=\footnotesize, text=rpc!85!black, anchor=east, inner sep=1.5pt] at (2.23,1.7) {lookup};
 
   % --- (1b) at the same time, the GPU starts recomputing from the first block ---
   \draw[compline] (0.3,4.85) -- (1.17,4.85);
