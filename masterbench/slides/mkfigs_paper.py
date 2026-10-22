@@ -201,6 +201,57 @@ def fig_shared_cores():
     return f.write("paper_shared_cores")
 
 
+def fig_three():
+    """Three experiments side by side, sharing the p99 lookup latency axis."""
+    e5, e4 = e5_get_p99(), e4_p99()
+    main_tl, mixed, starts = e3_timeline()
+    last = main_tl[-1]["sec"]
+    f = Fig()
+    w, h, gap = 4.9, 4.2, 0.55
+    ylim = (1, 30000)
+    yt = [1, 10, 100, 1000, 10000]
+    axes = [Ax(f, 0, 0, w, h, (0, 100), ylim, ylog=True),
+            Ax(f, w + gap, 0, w, h, (0, last), ylim, ylog=True),
+            Ax(f, 2 * (w + gap), 0, w, h, (-0.25, 4.25), ylim, ylog=True)]
+    for i, ax in enumerate(axes):
+        ax.yticks(yt, [LOG_MS[t] for t in yt] if i == 0 else [""] * len(yt))
+        ax.yminor()
+    a, b, c = axes
+    # (a) Load
+    pts = sorted((100 * k, v) for k, v in e5.items())
+    a.xticks([0, 25, 50, 75, 100], ["0", "25", "50", "75", "100"])
+    a.line(pts, f"{SER}, draw=cA")
+    a.marks(pts, "cA", "circle")
+    a.xlabel("Offered load (\\% of peak)", dy=0.5)
+    # (b) Full pool, 100M objects
+    b.xticks([0, 60, 120, 180], ["0", "60", "120", "180"])
+    for x in starts:
+        if 0 <= x <= last:
+            b.vline(x, "black!55, line width=0.6pt, dash pattern=on 2.5pt off 1.5pt")
+    b.line([(r["sec"], max(r["p99_ms"], 1)) for r in mixed], f"{SER}, draw=cA")
+    b.xlabel("Time (s)", dy=0.5)
+    # (c) Shared cores
+    client = [(k, e4[("client", k)][0]) for k in (0, 1, 2, 4)]
+    master = [(k, e4[("master", k)][0]) for k in (0, 1, 2, 4)]
+    c.xticks([0, 1, 2, 3, 4], ["0", "1", "2", "3", "4"])
+    c.line(client, f"{SER}, draw=cA")
+    c.line(master, f"{SER}, draw=cB, dash pattern=on 3pt off 1.5pt")
+    c.marks(client, "cA", "circle")
+    c.marks(master, "cB", "square")
+    c.xlabel("CPU-bound threads per core", dy=0.5)
+    for ax in axes:
+        ax.frame()
+    a.ylabel("p99 lookup latency (ms)", dx=1.0)
+    # Legends in the empty upper region of (b) and (c).
+    inner_legend(f, b.x0 + 0.12, h - 0.12, [("eviction round starts", ("ref", None, "on 2.5pt off 1.5pt"))])
+    inner_legend(f, c.x0 + c.w - 0.12, c.Y(2) , [("client cores", ("cA", "circle", None)),
+                                                ("master cores", ("cB", "square", "on 3pt off 1.5pt"))],
+                 anchor="south east")
+    for ax, label in zip(axes, ("(a) Load", "(b) Full pool, 100M objects", "(c) Shared cores, 12\\% of peak")):
+        f.add(rf"\node[lab, anchor=north, font=\small\bfseries] at ({f3(ax.x0 + ax.w / 2)},-1.15) {{{label}}};")
+    return f.write("paper_three")
+
+
 def main():
     """Write and build the paper-style slide figures.
 
@@ -208,7 +259,7 @@ def main():
     -----
     slides/fig_paper_{summary,load,full_pool,shared_cores}.{tex,pdf,png,svg}
     """
-    for make in (fig_summary, fig_load, fig_full_pool, fig_shared_cores):
+    for make in (fig_summary, fig_load, fig_full_pool, fig_shared_cores, fig_three):
         path = make()
         build(path)
         print("built", path.stem)
