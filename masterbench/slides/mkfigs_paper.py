@@ -159,6 +159,40 @@ def fig_load():
     return f.write("paper_load")
 
 
+def e5_get_percentiles():
+    """Median over repeats of p50 and p99 per offered-load fraction (128 clients)."""
+    import re
+    import statistics as st
+    out = {}
+    for r in read_jsonl("e5_get_128.jsonl"):
+        m = re.match(r"openget_f([0-9.]+)", r["tag"])
+        if m:
+            out.setdefault(float(m.group(1)), []).append(r)
+    return {k: (st.median(x["lat_p50_ms"] for x in v), st.median(x["lat_p99_ms"] for x in v))
+            for k, v in out.items()}
+
+
+def fig_load_p50():
+    d = e5_get_percentiles()
+    p50 = sorted((100 * k, v[0]) for k, v in d.items())
+    p99 = sorted((100 * k, v[1]) for k, v in d.items())
+    f = Fig()
+    ax = Ax(f, 0, 0, 7.0, 4.4, (0, 100), (0.5, 100), ylog=True)
+    ax.yticks([1, 10, 100], [LOG_MS[t] for t in (1, 10, 100)])
+    ax.yminor()
+    ax.xticks([0, 20, 40, 60, 80, 100], ["0", "20", "40", "60", "80", "100"])
+    ax.line(p50, f"{SER}, draw=cB, dash pattern=on 3pt off 1.5pt")
+    ax.line(p99, f"{SER}, draw=cA")
+    ax.marks(p50, "cB", "square")
+    ax.marks(p99, "cA", "circle")
+    ax.frame()
+    ax.xlabel("Offered load (\\% of peak throughput)", dy=0.55)
+    ax.ylabel("Lookup latency (ms)", dx=0.75)
+    inner_legend(f, 0.15, 4.28, [("p99", ("cA", "circle", None)),
+                                 ("p50", ("cB", "square", "on 3pt off 1.5pt"))])
+    return f.write("paper_load_p50")
+
+
 def fig_full_pool():
     main, mixed, starts = e3_timeline()
     last = main[-1]["sec"]
@@ -259,7 +293,7 @@ def main():
     -----
     slides/fig_paper_{summary,load,full_pool,shared_cores}.{tex,pdf,png,svg}
     """
-    for make in (fig_summary, fig_load, fig_full_pool, fig_shared_cores, fig_three):
+    for make in (fig_summary, fig_load, fig_full_pool, fig_shared_cores, fig_three, fig_load_p50):
         path = make()
         build(path)
         print("built", path.stem)
