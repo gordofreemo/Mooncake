@@ -1,0 +1,71 @@
+% Slide mockup (16:9): metadata load that serving induces on the master.
+% Inputs: Mooncake FAST'25 (Table 2 traces, >100B tokens/day, 256-token blocks,
+% LLaMA3-70B replays on 16 x 8-GPU nodes); capacities from E1/E2.
+% Build: lualatex slide_load_estimate.tex
+\documentclass{article}
+\usepackage{fontspec}
+\setsansfont{Helvetica}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{tikz}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\pagestyle{empty}
+\definecolor{subtext}{gray}{0.35}
+\newcommand{\gr}[1]{{\color{subtext}#1}}
+\begin{document}
+\setbox0=\hbox{%
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \path[use as bounding box] (0,0) rectangle (25.4,14.29);
+  \fill[white] (0,0) rectangle (25.4,14.29);
+
+  \node[anchor=north west, font=\fontsize{21}{25}\selectfont\bfseries] at (1.0,13.5)
+    {Estimated metadata load from serving};
+
+  % Table: keys/s sent to the master
+  \node[anchor=north, inner sep=0, font=\fontsize{13}{16}\selectfont] at (12.7,12.05) {%
+    \renewcommand{\arraystretch}{1.3}%
+    \setlength{\tabcolsep}{12pt}%
+    \begin{tabular}{@{}l rr rr@{}}
+      \toprule
+      & \multicolumn{2}{c}{One cluster (keys/s)} & \multicolumn{2}{c}{Kimi fleet (keys/s)} \\
+      \cmidrule(lr){2-3}\cmidrule(l){4-5}
+      Key granularity & Lookups & Writes & Lookups & Writes \\
+      \midrule
+      256-token block            & 160--220  & 90        & 4.5K  & 1.9--2.7K \\
+      64-token page per GPU      & 5.0--7.0K & 2.9--3.0K & 145K  & 59--87K \\
+      64-token page per GPU per layer & 400--560K & 230--240K & 11.6M & 4.7--6.9M \\
+      \midrule
+      Capacity of one master     & 5.1M      & 175K      & 5.1M  & 175K \\
+      \bottomrule
+    \end{tabular}};
+
+  % Inputs and model
+  \node[anchor=north west, text width=11.2cm, font=\fontsize{12.5}{15.5}\selectfont] at (1.0,6.5) {%
+    \textbf{Inputs} (Mooncake, FAST '25)\par\smallskip
+    \begin{itemize}[leftmargin=0.5cm, itemsep=4pt, topsep=0pt, parsep=0pt, label=\textbullet]
+      \item One cluster: Kimi's 1-hour traces, 16 nodes $\times$ 8 GPUs: 40--56K prompt tokens/s, 40--59\% cached.
+      \item Fleet: over 100B tokens/day, about 1.16M tokens/s.
+    \end{itemize}};
+  \node[anchor=north west, text width=11.2cm, font=\fontsize{12.5}{15.5}\selectfont] at (13.2,6.5) {%
+    \textbf{Model}\par\smallskip
+    \begin{itemize}[leftmargin=0.5cm, itemsep=4pt, topsep=0pt, parsep=0pt, label=\textbullet]
+      \item Lookups $=$ prompt tokens/s $\div$ tokens per key.
+      \item Writes $=$ (1 $-$ cached fraction) $\times$ lookups.
+      \item At most 5 calls per request: 17--33 calls/s per cluster.
+    \end{itemize}};
+
+  \node[anchor=north west, text width=23.4cm, font=\fontsize{12.5}{15.5}\selectfont] at (1.0,3.4)
+    {\textbf{Result.} At block or page granularity, one cluster needs under 0.2\% of the master's lookup
+     capacity and under 2\% of its write capacity. Only one key per layer exceeds the write capacity.};
+
+  \node[anchor=south west, text width=23.4cm, font=\fontsize{9.5}{11.5}\selectfont, text=subtext] at (1.0,0.45)
+    {Hourly (cluster) and daily (fleet) averages; peaks are higher. All tokens counted as prompt tokens (97--98\% are).
+     Page per GPU: SGLang HiCache with 8 GPUs; 80 layers as in LLaMA3-70B. Capacity: E1 on 16 cores, no network;
+     writes fall to 37.5K keys/s with 128 storage clients upstream and hold at 0.9M patched (E2). The fleet columns assume one master for all of Kimi.};
+\end{tikzpicture}}%
+\pdfvariable horigin=0pt
+\pdfvariable vorigin=0pt
+\pagewidth=\wd0
+\pageheight=\dimexpr\ht0+\dp0\relax
+\shipout\box0
+\end{document}
